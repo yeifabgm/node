@@ -5,7 +5,9 @@
 #ifndef V8_BASE_SMALL_VECTOR_H_
 #define V8_BASE_SMALL_VECTOR_H_
 
+#include <algorithm>
 #include <type_traits>
+#include <utility>
 
 #include "src/base/bits.h"
 #include "src/base/macros.h"
@@ -29,6 +31,10 @@ class SmallVector {
   explicit SmallVector(size_t size) { resize_no_init(size); }
   SmallVector(const SmallVector& other) V8_NOEXCEPT { *this = other; }
   SmallVector(SmallVector&& other) V8_NOEXCEPT { *this = std::move(other); }
+  SmallVector(std::initializer_list<T> init) {
+    resize_no_init(init.size());
+    memcpy(begin_, init.begin(), sizeof(T) * init.size());
+  }
 
   ~SmallVector() {
     if (is_big()) free(begin_);
@@ -82,16 +88,22 @@ class SmallVector {
     DCHECK_NE(0, size());
     return end_[-1];
   }
+  const T& back() const {
+    DCHECK_NE(0, size());
+    return end_[-1];
+  }
 
   T& operator[](size_t index) {
     DCHECK_GT(size(), index);
     return begin_[index];
   }
 
-  const T& operator[](size_t index) const {
+  const T& at(size_t index) const {
     DCHECK_GT(size(), index);
     return begin_[index];
   }
+
+  const T& operator[](size_t index) const { return at(index); }
 
   template <typename... Args>
   void emplace_back(Args&&... args) {

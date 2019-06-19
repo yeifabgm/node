@@ -4,14 +4,14 @@
 
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
-#include "src/code-factory.h"
-#include "src/counters.h"
+#include "src/codegen/code-factory.h"
+#include "src/execution/message-template.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
-#include "src/keys.h"
-#include "src/lookup.h"
-#include "src/message-template.h"
-#include "src/objects-inl.h"
-#include "src/property-descriptor.h"
+#include "src/logging/counters.h"
+#include "src/objects/keys.h"
+#include "src/objects/lookup.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property-descriptor.h"
 
 namespace v8 {
 namespace internal {
@@ -218,19 +218,6 @@ BUILTIN(ObjectFreeze) {
   return *object;
 }
 
-// ES section 19.1.2.9 Object.getPrototypeOf ( O )
-BUILTIN(ObjectGetPrototypeOf) {
-  HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-
-  Handle<JSReceiver> receiver;
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
-                                     Object::ToObject(isolate, object));
-
-  RETURN_RESULT_OR_FAILURE(isolate,
-                           JSReceiver::GetPrototype(isolate, receiver));
-}
-
 // ES6 section 19.1.2.21 Object.setPrototypeOf ( O, proto )
 BUILTIN(ObjectSetPrototypeOf) {
   HandleScope scope(isolate);
@@ -332,18 +319,6 @@ BUILTIN(ObjectGetOwnPropertySymbols) {
   return GetOwnPropertyKeys(isolate, args, SKIP_STRINGS);
 }
 
-// ES6 section 19.1.2.11 Object.isExtensible ( O )
-BUILTIN(ObjectIsExtensible) {
-  HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  Maybe<bool> result =
-      object->IsJSReceiver()
-          ? JSReceiver::IsExtensible(Handle<JSReceiver>::cast(object))
-          : Just(false);
-  MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
-  return isolate->heap()->ToBoolean(result.FromJust());
-}
-
 // ES6 section 19.1.2.12 Object.isFrozen ( O )
 BUILTIN(ObjectIsFrozen) {
   HandleScope scope(isolate);
@@ -401,18 +376,6 @@ BUILTIN(ObjectGetOwnPropertyDescriptors) {
   }
 
   return *descriptors;
-}
-
-// ES6 section 19.1.2.15 Object.preventExtensions ( O )
-BUILTIN(ObjectPreventExtensions) {
-  HandleScope scope(isolate);
-  Handle<Object> object = args.atOrUndefined(isolate, 1);
-  if (object->IsJSReceiver()) {
-    MAYBE_RETURN(JSReceiver::PreventExtensions(Handle<JSReceiver>::cast(object),
-                                               kThrowOnError),
-                 ReadOnlyRoots(isolate).exception());
-  }
-  return *object;
 }
 
 // ES6 section 19.1.2.17 Object.seal ( O )

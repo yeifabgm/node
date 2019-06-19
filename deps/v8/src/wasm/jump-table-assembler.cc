@@ -4,8 +4,8 @@
 
 #include "src/wasm/jump-table-assembler.h"
 
-#include "src/assembler-inl.h"
-#include "src/macro-assembler-inl.h"
+#include "src/codegen/assembler-inl.h"
+#include "src/codegen/macro-assembler-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -103,7 +103,7 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
 
 void JumpTableAssembler::EmitRuntimeStubSlot(Address builtin_target) {
   JumpToInstructionStream(builtin_target);
-  CheckConstPool(true, false);  // force emit of const pool
+  ForceConstantPoolEmissionWithoutJump();
 }
 
 void JumpTableAssembler::EmitJumpSlot(Address target) {

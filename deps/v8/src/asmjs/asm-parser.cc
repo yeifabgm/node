@@ -13,8 +13,8 @@
 #include "src/asmjs/asm-types.h"
 #include "src/base/optional.h"
 #include "src/base/overflowing-math.h"
-#include "src/conversions-inl.h"
-#include "src/flags.h"
+#include "src/flags/flags.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/parsing/scanner.h"
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-opcodes.h"
@@ -2108,7 +2108,11 @@ AsmType* AsmJsParser::ValidateCall() {
   // need to match the information stored at this point.
   base::Optional<TemporaryVariableScope> tmp;
   if (Check('[')) {
-    RECURSEn(EqualityExpression());
+    AsmType* index = nullptr;
+    RECURSEn(index = EqualityExpression());
+    if (!index->IsA(AsmType::Intish())) {
+      FAILn("Expected intish index");
+    }
     EXPECT_TOKENn('&');
     uint32_t mask = 0;
     if (!CheckForUnsigned(&mask)) {

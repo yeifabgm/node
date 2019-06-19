@@ -4,24 +4,24 @@
 
 #include "src/interpreter/bytecode-generator.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/ast/ast-source-ranges.h"
 #include "src/ast/scopes.h"
 #include "src/builtins/builtins-constructor.h"
-#include "src/compiler.h"
+#include "src/codegen/compiler.h"
+#include "src/codegen/unoptimized-compilation-info.h"
 #include "src/interpreter/bytecode-flags.h"
 #include "src/interpreter/bytecode-jump-table.h"
 #include "src/interpreter/bytecode-label.h"
 #include "src/interpreter/bytecode-register-allocator.h"
 #include "src/interpreter/control-flow-builders.h"
-#include "src/objects-inl.h"
 #include "src/objects/debug-objects.h"
 #include "src/objects/literal-objects-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/token.h"
-#include "src/unoptimized-compilation-info.h"
 
 namespace v8 {
 namespace internal {
@@ -1128,7 +1128,8 @@ void BytecodeGenerator::GenerateBytecodeBody() {
 
   // Create a generator object if necessary and initialize the
   // {.generator_object} variable.
-  if (IsResumableFunction(info()->literal()->kind())) {
+  FunctionLiteral* literal = info()->literal();
+  if (IsResumableFunction(literal->kind())) {
     BuildGeneratorObjectVariableInitialization();
   }
 
@@ -1146,6 +1147,9 @@ void BytecodeGenerator::GenerateBytecodeBody() {
     }
   }
 
+  // Increment the function-scope block coverage counter.
+  BuildIncrementBlockCoverageCounterIfEnabled(literal, SourceRangeKind::kBody);
+
   // Visit declarations within the function scope.
   VisitDeclarations(closure_scope()->declarations());
 
@@ -1153,17 +1157,22 @@ void BytecodeGenerator::GenerateBytecodeBody() {
   VisitModuleNamespaceImports();
 
   // Perform a stack-check before the body.
-  builder()->StackCheck(info()->literal()->start_position());
+  builder()->StackCheck(literal->start_position());
 
   // The derived constructor case is handled in VisitCallSuper.
-  if (IsBaseConstructor(function_kind()) &&
-      info()->literal()->requires_instance_members_initializer()) {
-    BuildInstanceMemberInitialization(Register::function_closure(),
-                                      builder()->Receiver());
+  if (IsBaseConstructor(function_kind())) {
+    if (literal->requires_brand_initialization()) {
+      BuildPrivateBrandInitialization(builder()->Receiver());
+    }
+
+    if (literal->requires_instance_members_initializer()) {
+      BuildInstanceMemberInitialization(Register::function_closure(),
+                                        builder()->Receiver());
+    }
   }
 
   // Visit statements in the function body.
-  VisitStatements(info()->literal()->body());
+  VisitStatements(literal->body());
 
   // Emit an implicit return instruction in case control flow can fall off the
   // end of the function without an explicit return being present on all paths.
@@ -1929,6 +1938,39 @@ bool BytecodeGenerator::ShouldOptimizeAsOneShot() const {
          info()->literal()->is_oneshot_iife();
 }
 
+void BytecodeGenerator::BuildPrivateClassMemberNameAssignment(
+    ClassLiteral::Property* property) {
+  DCHECK(property->is_private());
+  switch (property->kind()) {
+    case ClassLiteral::Property::FIELD: {
+      // Create the private name symbols for fields during class
+      // evaluation and store them on the context. These will be
+      // used as keys later during instance or static initialization.
+      RegisterAllocationScope private_name_register_scope(this);
+      Register private_name = register_allocator()->NewRegister();
+      VisitForRegisterValue(property->key(), private_name);
+      builder()
+          ->LoadLiteral(property->key()->AsLiteral()->AsRawPropertyName())
+          .StoreAccumulatorInRegister(private_name)
+          .CallRuntime(Runtime::kCreatePrivateNameSymbol, private_name);
+      DCHECK_NOT_NULL(property->private_name_var());
+      BuildVariableAssignment(property->private_name_var(), Token::INIT,
+                              HoleCheckMode::kElided);
+      break;
+    }
+    case ClassLiteral::Property::METHOD: {
+      // Create the closures for private methods.
+      VisitForAccumulatorValue(property->value());
+      BuildVariableAssignment(property->private_name_var(), Token::INIT,
+                              HoleCheckMode::kElided);
+      break;
+    }
+    default:
+      // TODO(joyee): Private accessors are not yet supported.
+      UNREACHABLE();
+  }
+}
+
 void BytecodeGenerator::BuildClassLiteral(ClassLiteral* expr, Register name) {
   size_t class_boilerplate_entry =
       builder()->AllocateDeferredConstantPoolEntry();
@@ -1993,19 +2035,15 @@ void BytecodeGenerator::BuildClassLiteral(ClassLiteral* expr, Register name) {
         }
       }
 
+      if (property->is_private()) {
+        BuildPrivateClassMemberNameAssignment(property);
+        // The private fields are initialized in the initializer function and
+        // the private brand for the private methods are initialized in the
+        // constructor instead.
+        continue;
+      }
+
       if (property->kind() == ClassLiteral::Property::FIELD) {
-        if (property->is_private()) {
-          RegisterAllocationScope private_name_register_scope(this);
-          Register private_name = register_allocator()->NewRegister();
-          VisitForRegisterValue(property->key(), private_name);
-          builder()
-              ->LoadLiteral(property->key()->AsLiteral()->AsRawPropertyName())
-              .StoreAccumulatorInRegister(private_name)
-              .CallRuntime(Runtime::kCreatePrivateNameSymbol, private_name);
-          DCHECK_NOT_NULL(property->private_name_var());
-          BuildVariableAssignment(property->private_name_var(), Token::INIT,
-                                  HoleCheckMode::kElided);
-        }
         // We don't compute field's value here, but instead do it in the
         // initializer function.
         continue;
@@ -2026,6 +2064,23 @@ void BytecodeGenerator::BuildClassLiteral(ClassLiteral* expr, Register name) {
            expr->class_variable()->IsContextSlot());
     builder()->LoadAccumulatorWithRegister(class_constructor);
     BuildVariableAssignment(expr->class_variable(), Token::INIT,
+                            HoleCheckMode::kElided);
+  }
+
+  // Create the class brand symbol and store it on the context
+  // during class evaluation. This will be stored in the
+  // receiver later in the constructor.
+  if (expr->scope()->brand() != nullptr) {
+    Register brand = register_allocator()->NewRegister();
+    const AstRawString* class_name =
+        expr->class_variable() != nullptr
+            ? expr->class_variable()->raw_name()
+            : ast_string_constants()->empty_string();
+    builder()
+        ->LoadLiteral(class_name)
+        .StoreAccumulatorInRegister(brand)
+        .CallRuntime(Runtime::kCreatePrivateNameSymbol, brand);
+    BuildVariableAssignment(expr->scope()->brand(), Token::INIT,
                             HoleCheckMode::kElided);
   }
 
@@ -2110,6 +2165,10 @@ void BytecodeGenerator::VisitInitializeClassMembersStatement(
 
   for (int i = 0; i < stmt->fields()->length(); i++) {
     ClassLiteral::Property* property = stmt->fields()->at(i);
+    // Private methods are not initialized in the
+    // InitializeClassMembersStatement.
+    DCHECK_IMPLIES(property->is_private(),
+                   property->kind() == ClassLiteral::Property::FIELD);
 
     if (property->is_computed_name()) {
       DCHECK_EQ(property->kind(), ClassLiteral::Property::FIELD);
@@ -2120,8 +2179,7 @@ void BytecodeGenerator::VisitInitializeClassMembersStatement(
       // variable at class definition time.
       BuildVariableLoad(var, HoleCheckMode::kElided);
       builder()->StoreAccumulatorInRegister(key);
-    } else if (property->kind() == ClassLiteral::Property::FIELD &&
-               property->is_private()) {
+    } else if (property->is_private()) {
       Variable* private_name_var = property->private_name_var();
       DCHECK_NOT_NULL(private_name_var);
       BuildVariableLoad(private_name_var, HoleCheckMode::kElided);
@@ -2141,6 +2199,17 @@ void BytecodeGenerator::VisitInitializeClassMembersStatement(
             : Runtime::kAddPrivateField;
     builder()->CallRuntime(function_id, args);
   }
+}
+
+void BytecodeGenerator::BuildPrivateBrandInitialization(Register receiver) {
+  RegisterList brand_args = register_allocator()->NewRegisterList(2);
+  Variable* brand = info()->scope()->outer_scope()->AsClassScope()->brand();
+  DCHECK_NOT_NULL(brand);
+  BuildVariableLoad(brand, HoleCheckMode::kElided);
+  builder()
+      ->StoreAccumulatorInRegister(brand_args[1])
+      .MoveRegister(receiver, brand_args[0])
+      .CallRuntime(Runtime::kAddPrivateBrand, brand_args);
 }
 
 void BytecodeGenerator::BuildInstanceMemberInitialization(Register constructor,
@@ -2297,13 +2366,6 @@ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
     RegisterAllocationScope register_scope(this);
     Expression* property = expr->properties()->first()->value();
     Register from_value = VisitForRegisterValue(property);
-
-    BytecodeLabels clone_object(zone());
-    builder()->JumpIfUndefined(clone_object.New());
-    builder()->JumpIfNull(clone_object.New());
-    builder()->ToObject(from_value);
-
-    clone_object.Bind(builder());
     int clone_index = feedback_index(feedback_spec()->AddCloneObjectSlot());
     builder()->CloneObject(from_value, flags, clone_index);
     builder()->StoreAccumulatorInRegister(literal);
@@ -2504,7 +2566,7 @@ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
         builder()->MoveRegister(literal, args[0]);
         builder()->SetExpressionPosition(property->value());
         VisitForRegisterValue(property->value(), args[1]);
-        builder()->CallRuntime(Runtime::kCopyDataProperties, args);
+        builder()->CallRuntime(Runtime::kInlineCopyDataProperties, args);
         break;
       }
       case ObjectLiteral::Property::PROTOTYPE:
@@ -3087,6 +3149,13 @@ BytecodeGenerator::AssignmentLhsData::NamedSuperProperty(
 }
 // static
 BytecodeGenerator::AssignmentLhsData
+BytecodeGenerator::AssignmentLhsData::PrivateMethod(Register object,
+                                                    const AstRawString* name) {
+  return AssignmentLhsData(PRIVATE_METHOD, nullptr, RegisterList(), object,
+                           Register(), nullptr, name);
+}
+// static
+BytecodeGenerator::AssignmentLhsData
 BytecodeGenerator::AssignmentLhsData::KeyedSuperProperty(
     RegisterList super_property_args) {
   return AssignmentLhsData(KEYED_SUPER_PROPERTY, nullptr, super_property_args,
@@ -3115,6 +3184,13 @@ BytecodeGenerator::AssignmentLhsData BytecodeGenerator::PrepareAssignmentLhs(
       Register object = VisitForRegisterValue(property->obj());
       Register key = VisitForRegisterValue(property->key());
       return AssignmentLhsData::KeyedProperty(object, key);
+    }
+    case PRIVATE_METHOD: {
+      DCHECK(!property->IsSuperAccess());
+      AccumulatorPreservingScope scope(this, accumulator_preserving_mode);
+      Register object = VisitForRegisterValue(property->obj());
+      const AstRawString* name = property->key()->AsVariableProxy()->raw_name();
+      return AssignmentLhsData::PrivateMethod(object, name);
     }
     case NAMED_SUPER_PROPERTY: {
       AccumulatorPreservingScope scope(this, accumulator_preserving_mode);
@@ -3150,15 +3226,16 @@ BytecodeGenerator::AssignmentLhsData BytecodeGenerator::PrepareAssignmentLhs(
 
 // Build the iteration finalizer called in the finally block of an iteration
 // protocol execution. This closes the iterator if needed, and suppresses any
-// exception it throws if necessary.
+// exception it throws if necessary, including the exception when the return
+// method is not callable.
 //
 // In pseudo-code, this builds:
 //
 // if (!done) {
 //   let method = iterator.return
 //   if (method !== null && method !== undefined) {
-//     if (typeof(method) !== "function") throw TypeError
 //     try {
+//       if (typeof(method) !== "function") throw TypeError
 //       let return_val = method.call(iterator)
 //       if (!%IsObject(return_val)) throw TypeError
 //     } catch (e) {
@@ -3190,33 +3267,35 @@ void BytecodeGenerator::BuildFinalizeIteration(
       .JumpIfUndefined(iterator_is_done.New())
       .JumpIfNull(iterator_is_done.New());
 
-  //     if (typeof(method) !== "function") throw TypeError
-  BytecodeLabel if_callable;
-  builder()
-      ->CompareTypeOf(TestTypeOfFlags::LiteralFlag::kFunction)
-      .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &if_callable);
-  {
-    // throw %NewTypeError(kReturnMethodNotCallable)
-    RegisterAllocationScope register_scope(this);
-    RegisterList new_type_error_args = register_allocator()->NewRegisterList(2);
-    builder()
-        ->LoadLiteral(Smi::FromEnum(MessageTemplate::kReturnMethodNotCallable))
-        .StoreAccumulatorInRegister(new_type_error_args[0])
-        .LoadLiteral(ast_string_constants()->empty_string())
-        .StoreAccumulatorInRegister(new_type_error_args[1])
-        .CallRuntime(Runtime::kNewTypeError, new_type_error_args)
-        .Throw();
-  }
-  builder()->Bind(&if_callable);
-
   {
     RegisterAllocationScope register_scope(this);
     BuildTryCatch(
         // try {
+        //   if (typeof(method) !== "function") throw TypeError
         //   let return_val = method.call(iterator)
         //   if (!%IsObject(return_val)) throw TypeError
         // }
         [&]() {
+          BytecodeLabel if_callable;
+          builder()
+              ->CompareTypeOf(TestTypeOfFlags::LiteralFlag::kFunction)
+              .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &if_callable);
+          {
+            // throw %NewTypeError(kReturnMethodNotCallable)
+            RegisterAllocationScope register_scope(this);
+            RegisterList new_type_error_args =
+                register_allocator()->NewRegisterList(2);
+            builder()
+                ->LoadLiteral(
+                    Smi::FromEnum(MessageTemplate::kReturnMethodNotCallable))
+                .StoreAccumulatorInRegister(new_type_error_args[0])
+                .LoadLiteral(ast_string_constants()->empty_string())
+                .StoreAccumulatorInRegister(new_type_error_args[1])
+                .CallRuntime(Runtime::kNewTypeError, new_type_error_args)
+                .Throw();
+          }
+          builder()->Bind(&if_callable);
+
           RegisterList args(iterator.object());
           builder()->CallProperty(
               method, args, feedback_index(feedback_spec()->AddCallICSlot()));
@@ -3667,6 +3746,9 @@ void BytecodeGenerator::BuildAssignment(
                        lhs_data.super_property_args());
       break;
     }
+    case PRIVATE_METHOD:
+      // TODO(joyee): Throw TypeError because private methods are not writable.
+      UNREACHABLE();
   }
 }
 
@@ -3712,6 +3794,9 @@ void BytecodeGenerator::VisitCompoundAssignment(CompoundAssignment* expr) {
                              lhs_data.super_property_args().Truncate(3));
       break;
     }
+    case PRIVATE_METHOD:
+      // TODO(joyee): Throw TypeError because private methods are not writable.
+      UNREACHABLE();
   }
   BinaryOperation* binop = expr->AsCompoundAssignment()->binary_operation();
   FeedbackSlot slot = feedback_spec()->AddBinaryOpICSlot();
@@ -3857,7 +3942,10 @@ void BytecodeGenerator::VisitYield(Yield* expr) {
 //           break;
 //         case kReturn:
 //           let iteratorReturn = iterator.return;
-//           if (IS_NULL_OR_UNDEFINED(iteratorReturn)) return input;
+//           if (IS_NULL_OR_UNDEFINED(iteratorReturn)) {
+//             if (IS_ASYNC_GENERATOR) input = await input;
+//             return input;
+//           }
 //           output = iteratorReturn.[[Call]](iterator, «input»);
 //           break;
 //         case kThrow:
@@ -3965,6 +4053,8 @@ void BytecodeGenerator::VisitYieldStar(YieldStar* expr) {
           no_return_method.Bind(builder());
           builder()->LoadAccumulatorWithRegister(input);
           if (iterator_type == IteratorType::kAsync) {
+            // Await input.
+            BuildAwait(expr->position());
             execution_control()->AsyncReturnAccumulator();
           } else {
             execution_control()->ReturnAccumulator();
@@ -4164,6 +4254,8 @@ void BytecodeGenerator::VisitPropertyLoad(Register obj, Property* property) {
     case KEYED_SUPER_PROPERTY:
       VisitKeyedSuperPropertyLoad(property, Register::invalid_value());
       break;
+    case PRIVATE_METHOD:
+      UNREACHABLE();  // TODO(joyee): implement private method access.
   }
 }
 
@@ -4268,7 +4360,8 @@ void BytecodeGenerator::VisitCall(Call* expr) {
   // the semantics of the underlying call type.
   switch (call_type) {
     case Call::NAMED_PROPERTY_CALL:
-    case Call::KEYED_PROPERTY_CALL: {
+    case Call::KEYED_PROPERTY_CALL:
+    case Call::PRIVATE_CALL: {
       Property* property = callee_expr->AsProperty();
       VisitAndPushIntoRegisterList(property->obj(), &args);
       VisitPropertyLoadForRegister(args.last_register(), property, callee);
@@ -4345,7 +4438,6 @@ void BytecodeGenerator::VisitCall(Call* expr) {
     }
     case Call::SUPER_CALL:
       UNREACHABLE();
-      break;
   }
 
   // Evaluate all arguments to the function call and store in sequential args
@@ -4475,6 +4567,13 @@ void BytecodeGenerator::VisitCallSuper(Call* expr) {
     BuildVariableAssignment(var, Token::INIT, HoleCheckMode::kRequired);
   }
 
+  Register instance = register_allocator()->NewRegister();
+  builder()->StoreAccumulatorInRegister(instance);
+
+  if (info()->literal()->requires_brand_initialization()) {
+    BuildPrivateBrandInitialization(instance);
+  }
+
   // The derived constructor has the correct bit set always, so we
   // don't emit code to load and call the initializer if not
   // required.
@@ -4487,11 +4586,10 @@ void BytecodeGenerator::VisitCallSuper(Call* expr) {
   // if required.
   if (info()->literal()->requires_instance_members_initializer() ||
       !IsDerivedConstructor(info()->literal()->kind())) {
-    Register instance = register_allocator()->NewRegister();
-    builder()->StoreAccumulatorInRegister(instance);
     BuildInstanceMemberInitialization(this_function, instance);
-    builder()->LoadAccumulatorWithRegister(instance);
   }
+
+  builder()->LoadAccumulatorWithRegister(instance);
 }
 
 void BytecodeGenerator::VisitCallNew(CallNew* expr) {
@@ -4599,6 +4697,7 @@ void BytecodeGenerator::VisitDelete(UnaryOperation* unary) {
     // Delete of an object property is allowed both in sloppy
     // and strict modes.
     Property* property = expr->AsProperty();
+    DCHECK(!property->IsPrivateReference());
     Register object = VisitForRegisterValue(property->obj());
     VisitForAccumulatorValue(property->key());
     builder()->Delete(object, language_mode());
@@ -4706,6 +4805,10 @@ void BytecodeGenerator::VisitCountOperation(CountOperation* expr) {
       builder()->CallRuntime(Runtime::kLoadKeyedFromSuper, load_super_args);
       break;
     }
+    case PRIVATE_METHOD: {
+      // TODO(joyee): Throw TypeError because private methods are not writable.
+      UNREACHABLE();
+    }
   }
 
   // Save result for postfix expressions.
@@ -4771,6 +4874,10 @@ void BytecodeGenerator::VisitCountOperation(CountOperation* expr) {
           ->StoreAccumulatorInRegister(super_property_args[3])
           .CallRuntime(Runtime::kStoreKeyedToSuper, super_property_args);
       break;
+    }
+    case PRIVATE_METHOD: {
+      // TODO(joyee): Throw TypeError because private methods are not writable.
+      UNREACHABLE();
     }
   }
 

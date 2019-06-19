@@ -30,44 +30,24 @@
 #include <sstream>
 
 #include "include/v8.h"
-#include "src/api-inl.h"
-#include "src/assembler-arch.h"
+#include "src/api/api-inl.h"
 #include "src/ast/ast.h"
-#include "src/char-predicates-inl.h"
-#include "src/macro-assembler.h"
-#include "src/objects-inl.h"
-#include "src/ostreams.h"
-#include "src/regexp/interpreter-irregexp.h"
-#include "src/regexp/jsregexp.h"
+#include "src/codegen/assembler-arch.h"
+#include "src/codegen/macro-assembler.h"
+#include "src/init/v8.h"
+#include "src/objects/objects-inl.h"
+#include "src/regexp/regexp-compiler.h"
+#include "src/regexp/regexp-interpreter.h"
+#include "src/regexp/regexp-macro-assembler-arch.h"
 #include "src/regexp/regexp-macro-assembler-irregexp.h"
-#include "src/regexp/regexp-macro-assembler.h"
 #include "src/regexp/regexp-parser.h"
-#include "src/splay-tree-inl.h"
-#include "src/string-stream.h"
-#include "src/unicode-inl.h"
-#include "src/v8.h"
+#include "src/regexp/regexp.h"
+#include "src/strings/char-predicates-inl.h"
+#include "src/strings/string-stream.h"
+#include "src/strings/unicode-inl.h"
+#include "src/utils/ostreams.h"
+#include "src/utils/splay-tree-inl.h"
 #include "src/zone/zone-list-inl.h"
-
-#if V8_TARGET_ARCH_ARM
-#include "src/regexp/arm/regexp-macro-assembler-arm.h"
-#elif V8_TARGET_ARCH_ARM64
-#include "src/regexp/arm64/regexp-macro-assembler-arm64.h"
-#elif V8_TARGET_ARCH_S390
-#include "src/regexp/s390/regexp-macro-assembler-s390.h"
-#elif V8_TARGET_ARCH_PPC
-#include "src/regexp/ppc/regexp-macro-assembler-ppc.h"
-#elif V8_TARGET_ARCH_MIPS
-#include "src/regexp/mips/regexp-macro-assembler-mips.h"
-#elif V8_TARGET_ARCH_MIPS64
-#include "src/regexp/mips64/regexp-macro-assembler-mips64.h"
-#elif V8_TARGET_ARCH_X64
-#include "src/regexp/x64/regexp-macro-assembler-x64.h"
-#elif V8_TARGET_ARCH_IA32
-#include "src/regexp/ia32/regexp-macro-assembler-ia32.h"
-#else
-#error Unknown architecture.
-#endif
-
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -281,8 +261,9 @@ TEST(RegExpParser) {
   CheckParseEq("\\u0034", "'\x34'");
   CheckParseEq("\\u003z", "'u003z'");
   CheckParseEq("foo[z]*", "(: 'foo' (# 0 - g [z]))");
-  CheckParseEq("^^^$$$\\b\\b\\b\\b", "(: @^i @$i @b)");
-  CheckParseEq("\\b\\b\\b\\b\\B\\B\\B\\B\\b\\b\\b\\b", "(: @b @B @b)");
+  CheckParseEq("^^^$$$\\b\\b\\b\\b", "(: @^i @^i @^i @$i @$i @$i @b @b @b @b)");
+  CheckParseEq("\\b\\b\\b\\b\\B\\B\\B\\B\\b\\b\\b\\b",
+               "(: @b @b @b @b @B @B @B @B @b @b @b @b)");
   CheckParseEq("\\b\\B\\b", "(: @b @B @b)");
 
   // Unicode regexps
@@ -566,8 +547,8 @@ static RegExpNode* Compile(const char* input, bool multiline, bool unicode,
                                .ToHandleChecked();
   Handle<String> sample_subject =
       isolate->factory()->NewStringFromUtf8(CStrVector("")).ToHandleChecked();
-  RegExpEngine::Compile(isolate, zone, &compile_data, flags, pattern,
-                        sample_subject, is_one_byte);
+  RegExp::CompileForTesting(isolate, zone, &compile_data, flags, pattern,
+                            sample_subject, is_one_byte);
   return compile_data.node;
 }
 
@@ -579,17 +560,15 @@ static void Execute(const char* input, bool multiline, bool unicode,
   RegExpNode* node = Compile(input, multiline, unicode, is_one_byte, &zone);
   USE(node);
 #ifdef DEBUG
-  if (dot_output) {
-    RegExpEngine::DotPrint(input, node, false);
-  }
+  if (dot_output) RegExp::DotPrintForTesting(input, node);
 #endif  // DEBUG
 }
 
 
 class TestConfig {
  public:
-  typedef int Key;
-  typedef int Value;
+  using Key = int;
+  using Value = int;
   static const int kNoKey;
   static int NoValue() { return 0; }
   static inline int Compare(int a, int b) {
@@ -674,7 +653,7 @@ TEST(DispatchTableConstruction) {
     for (int j = 0; j < 2 * kRangeSize; j++) {
       range[j] = PseudoRandom(i + 25, j + 87) % kLimit;
     }
-    range.Sort();
+    std::sort(range.begin(), range.end());
     for (int j = 1; j < 2 * kRangeSize; j++) {
       CHECK(range[j-1] <= range[j]);
     }
@@ -733,23 +712,23 @@ TEST(ParsePossessiveRepetition) {
 // Tests of interpreter.
 
 #if V8_TARGET_ARCH_IA32
-typedef RegExpMacroAssemblerIA32 ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerIA32;
 #elif V8_TARGET_ARCH_X64
-typedef RegExpMacroAssemblerX64 ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerX64;
 #elif V8_TARGET_ARCH_ARM
-typedef RegExpMacroAssemblerARM ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerARM;
 #elif V8_TARGET_ARCH_ARM64
-typedef RegExpMacroAssemblerARM64 ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerARM64;
 #elif V8_TARGET_ARCH_S390
-typedef RegExpMacroAssemblerS390 ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerS390;
 #elif V8_TARGET_ARCH_PPC
-typedef RegExpMacroAssemblerPPC ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerPPC;
 #elif V8_TARGET_ARCH_MIPS
-typedef RegExpMacroAssemblerMIPS ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerMIPS;
 #elif V8_TARGET_ARCH_MIPS64
-typedef RegExpMacroAssemblerMIPS ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerMIPS;
 #elif V8_TARGET_ARCH_X87
-typedef RegExpMacroAssemblerX87 ArchRegExpMacroAssembler;
+using ArchRegExpMacroAssembler = RegExpMacroAssemblerX87;
 #endif
 
 class ContextInitializer {
@@ -1451,43 +1430,6 @@ TEST(MacroAssembler) {
   CHECK_EQ(42, captures[0]);
 }
 
-TEST(AddInverseToTable) {
-  static const int kLimit = 1000;
-  static const int kRangeCount = 16;
-  for (int t = 0; t < 10; t++) {
-    Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-    ZoneList<CharacterRange>* ranges =
-        new(&zone) ZoneList<CharacterRange>(kRangeCount, &zone);
-    for (int i = 0; i < kRangeCount; i++) {
-      int from = PseudoRandom(t + 87, i + 25) % kLimit;
-      int to = from + (PseudoRandom(i + 87, t + 25) % (kLimit / 20));
-      if (to > kLimit) to = kLimit;
-      ranges->Add(CharacterRange::Range(from, to), &zone);
-    }
-    DispatchTable table(&zone);
-    DispatchTableConstructor cons(&table, false, &zone);
-    cons.set_choice_index(0);
-    cons.AddInverse(ranges);
-    for (int i = 0; i < kLimit; i++) {
-      bool is_on = false;
-      for (int j = 0; !is_on && j < kRangeCount; j++)
-        is_on = ranges->at(j).Contains(i);
-      OutSet* set = table.Get(i);
-      CHECK_EQ(is_on, set->Get(0) == false);
-    }
-  }
-  Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
-  ZoneList<CharacterRange>* ranges =
-      new(&zone) ZoneList<CharacterRange>(1, &zone);
-  ranges->Add(CharacterRange::Range(0xFFF0, 0xFFFE), &zone);
-  DispatchTable table(&zone);
-  DispatchTableConstructor cons(&table, false, &zone);
-  cons.set_choice_index(0);
-  cons.AddInverse(ranges);
-  CHECK(!table.Get(0xFFFE)->Get(0));
-  CHECK(table.Get(0xFFFF)->Get(0));
-}
-
 #ifndef V8_INTL_SUPPORT
 static uc32 canonicalize(uc32 c) {
   unibrow::uchar canon[unibrow::Ecma262Canonicalize::kMaxWidth];
@@ -1649,10 +1591,10 @@ TEST(CharacterRangeCaseIndependence) {
 #endif  // !V8_INTL_SUPPORT
 }
 
-
-static bool InClass(uc32 c, ZoneList<CharacterRange>* ranges) {
+static bool InClass(uc32 c,
+                    const UnicodeRangeSplitter::CharacterRangeVector* ranges) {
   if (ranges == nullptr) return false;
-  for (int i = 0; i < ranges->length(); i++) {
+  for (size_t i = 0; i < ranges->size(); i++) {
     CharacterRange range = ranges->at(i);
     if (range.from() <= c && c <= range.to())
       return true;
@@ -1660,13 +1602,12 @@ static bool InClass(uc32 c, ZoneList<CharacterRange>* ranges) {
   return false;
 }
 
-
 TEST(UnicodeRangeSplitter) {
   Zone zone(CcTest::i_isolate()->allocator(), ZONE_NAME);
   ZoneList<CharacterRange>* base =
       new(&zone) ZoneList<CharacterRange>(1, &zone);
   base->Add(CharacterRange::Everything(), &zone);
-  UnicodeRangeSplitter splitter(&zone, base);
+  UnicodeRangeSplitter splitter(base);
   // BMP
   for (uc32 c = 0; c < 0xD800; c++) {
     CHECK(InClass(c, splitter.bmp()));

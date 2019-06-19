@@ -6,14 +6,15 @@
 
 #include <vector>
 
-#include "src/char-predicates-inl.h"
+#include "src/execution/isolate.h"
 #include "src/heap/factory.h"
-#include "src/isolate.h"
-#include "src/objects-inl.h"
-#include "src/ostreams.h"
-#include "src/regexp/jsregexp.h"
+#include "src/objects/objects-inl.h"
 #include "src/regexp/property-sequences.h"
-#include "src/utils.h"
+#include "src/regexp/regexp-macro-assembler.h"
+#include "src/regexp/regexp.h"
+#include "src/strings/char-predicates-inl.h"
+#include "src/utils/ostreams.h"
+#include "src/utils/utils.h"
 #include "src/zone/zone-list-inl.h"
 
 #ifdef V8_INTL_SUPPORT
@@ -77,7 +78,7 @@ void RegExpParser::Advance() {
   if (has_next()) {
     StackLimitCheck check(isolate());
     if (check.HasOverflowed()) {
-      if (FLAG_abort_on_stack_or_string_length_overflow) {
+      if (FLAG_correctness_fuzzer_suppressions) {
         FATAL("Aborting on stack overflow");
       }
       ReportError(CStrVector(
@@ -995,7 +996,7 @@ Handle<FixedArray> RegExpParser::CreateCaptureNameMap() {
                                     capture->name()->size());
     // CSA code in ConstructNewResultFromMatchInfo requires these strings to be
     // internalized so they can be used as property names in the 'exec' results.
-    Handle<String> name = factory->InternalizeTwoByteString(capture_name);
+    Handle<String> name = factory->InternalizeString(capture_name);
     array->set(i * 2, *name);
     array->set(i * 2 + 1, Smi::FromInt(capture->index()));
   }
@@ -1963,12 +1964,6 @@ void RegExpBuilder::AddTerm(RegExpTree* term) {
 
 void RegExpBuilder::AddAssertion(RegExpTree* assert) {
   FlushText();
-  if (terms_.length() > 0 && terms_.last()->IsAssertion()) {
-    // Omit repeated assertions of the same type.
-    RegExpAssertion* last = terms_.last()->AsAssertion();
-    RegExpAssertion* next = assert->AsAssertion();
-    if (last->assertion_type() == next->assertion_type()) return;
-  }
   terms_.Add(assert, zone());
   LAST(ADD_ASSERT);
 }

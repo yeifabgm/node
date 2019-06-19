@@ -5,10 +5,10 @@
 #ifndef V8_REGEXP_REGEXP_AST_H_
 #define V8_REGEXP_REGEXP_AST_H_
 
-#include "src/objects.h"
 #include "src/objects/js-regexp.h"
+#include "src/objects/objects.h"
 #include "src/objects/string.h"
-#include "src/utils.h"
+#include "src/utils/utils.h"
 #include "src/zone/zone-containers.h"
 #include "src/zone/zone.h"
 
@@ -268,12 +268,13 @@ class RegExpAlternative final : public RegExpTree {
 class RegExpAssertion final : public RegExpTree {
  public:
   enum AssertionType {
-    START_OF_LINE,
-    START_OF_INPUT,
-    END_OF_LINE,
-    END_OF_INPUT,
-    BOUNDARY,
-    NON_BOUNDARY
+    START_OF_LINE = 0,
+    START_OF_INPUT = 1,
+    END_OF_LINE = 2,
+    END_OF_INPUT = 3,
+    BOUNDARY = 4,
+    NON_BOUNDARY = 5,
+    LAST_TYPE = NON_BOUNDARY,
   };
   RegExpAssertion(AssertionType type, JSRegExp::Flags flags)
       : assertion_type_(type), flags_(flags) {}
@@ -285,7 +286,8 @@ class RegExpAssertion final : public RegExpTree {
   bool IsAnchoredAtEnd() override;
   int min_match() override { return 0; }
   int max_match() override { return 0; }
-  AssertionType assertion_type() { return assertion_type_; }
+  AssertionType assertion_type() const { return assertion_type_; }
+  JSRegExp::Flags flags() const { return flags_; }
 
  private:
   const AssertionType assertion_type_;

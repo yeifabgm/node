@@ -4,12 +4,12 @@
 
 #include "src/compiler/js-inlining-heuristic.h"
 
+#include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/simplified-operator.h"
-#include "src/objects-inl.h"
-#include "src/optimized-compilation-info.h"
+#include "src/objects/objects-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -65,7 +65,7 @@ JSInliningHeuristic::Candidate JSInliningHeuristic::CollectFunctions(
       out.functions[n] = m.Ref(broker()).AsJSFunction();
       JSFunctionRef function = out.functions[n].value();
       if (function.IsSerializedForCompilation()) {
-        out.bytecode[n] = function.shared().GetBytecodeArray(), isolate();
+        out.bytecode[n] = function.shared().GetBytecodeArray();
       }
     }
     out.num_functions = value_input_count;
@@ -118,13 +118,13 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
       // continue the inlining checks. Log a warning and continue.
       if (candidate.functions[i].has_value()) {
         TRACE_BROKER(broker(),
-                     "Missing bytecode array trying to inline function "
-                         << candidate.functions[i].value().object().address());
+                     "Missing bytecode array trying to inline JSFunction "
+                         << *candidate.functions[i]);
       } else {
         TRACE_BROKER(
             broker(),
-            "Missing bytecode array trying to inline function with SFI "
-                << candidate.shared_info.value().object().address());
+            "Missing bytecode array trying to inline SharedFunctionInfo "
+                << *candidate.shared_info);
       }
       // Those functions that don't have their bytecode serialized probably
       // don't have the SFI either, so we exit the loop early.
@@ -221,6 +221,11 @@ void JSInliningHeuristic::Finalize() {
     Candidate candidate = *i;
     candidates_.erase(i);
 
+    // Make sure we don't try to inline dead candidate nodes.
+    if (candidate.node->IsDead()) {
+      continue;
+    }
+
     // Make sure we have some extra budget left, so that any small functions
     // exposed by this function would be given a chance to inline.
     double size_of_candidate =
@@ -231,11 +236,8 @@ void JSInliningHeuristic::Finalize() {
       continue;
     }
 
-    // Make sure we don't try to inline dead candidate nodes.
-    if (!candidate.node->IsDead()) {
-      Reduction const reduction = InlineCandidate(candidate, false);
-      if (reduction.Changed()) return;
-    }
+    Reduction const reduction = InlineCandidate(candidate, false);
+    if (reduction.Changed()) return;
   }
 }
 
@@ -343,18 +345,12 @@ Node* JSInliningHeuristic::DuplicateFrameStateAndRename(Node* frame_state,
 }
 
 bool JSInliningHeuristic::TryReuseDispatch(Node* node, Node* callee,
-                                           Candidate const& candidate,
                                            Node** if_successes, Node** calls,
                                            Node** inputs, int input_count) {
   // We will try to reuse the control flow branch created for computing
   // the {callee} target of the call. We only reuse the branch if there
   // is no side-effect between the call and the branch, and if the callee is
   // only used as the target (and possibly also in the related frame states).
-
-  int const num_calls = candidate.num_functions;
-
-  DCHECK_EQ(IrOpcode::kPhi, callee->opcode());
-  DCHECK_EQ(num_calls, callee->op()->ValueInputCount());
 
   // We are trying to match the following pattern:
   //
@@ -437,6 +433,11 @@ bool JSInliningHeuristic::TryReuseDispatch(Node* node, Node* callee,
   //                             Phi
   //                              |
   //                             ...
+
+  // Bailout if the call is not polymorphic anymore (other reducers might
+  // have replaced the callee phi with a constant).
+  if (callee->opcode() != IrOpcode::kPhi) return false;
+  int const num_calls = callee->op()->ValueInputCount();
 
   // If there is a control node between the callee computation
   // and the call, bail out.
@@ -584,7 +585,7 @@ void JSInliningHeuristic::CreateOrReuseDispatch(Node* node, Node* callee,
                                                 int input_count) {
   SourcePositionTable::Scope position(
       source_positions_, source_positions_->GetSourcePosition(node));
-  if (TryReuseDispatch(node, callee, candidate, if_successes, calls, inputs,
+  if (TryReuseDispatch(node, callee, if_successes, calls, inputs,
                        input_count)) {
     return;
   }
@@ -744,7 +745,7 @@ void JSInliningHeuristic::PrintCandidates() {
               ? candidate.functions[i].value().shared()
               : candidate.shared_info.value();
       PrintF("  - size:%d, name: %s\n", candidate.bytecode[i].value().length(),
-             shared.object()->DebugName()->ToCString().get());
+             shared.object()->DebugName().ToCString().get());
     }
   }
 }

@@ -10,9 +10,9 @@
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/typer.h"
+#include "src/execution/isolate.h"
 #include "src/heap/factory-inl.h"
-#include "src/isolate.h"
-#include "src/objects.h"
+#include "src/objects/objects.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -24,7 +24,7 @@ class JSTypedLoweringTester : public HandleAndZoneScope {
   explicit JSTypedLoweringTester(int num_parameters = 0)
       : isolate(main_isolate()),
         canonical(isolate),
-        js_heap_broker(isolate, main_zone()),
+        js_heap_broker(isolate, main_zone(), FLAG_trace_heap_broker),
         binop(nullptr),
         unop(nullptr),
         javascript(main_zone()),

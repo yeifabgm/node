@@ -5,10 +5,10 @@
 #ifndef V8_OBJECTS_JS_OBJECTS_H_
 #define V8_OBJECTS_JS_OBJECTS_H_
 
-#include "src/objects.h"
 #include "src/objects/embedder-data-slot.h"
+#include "src/objects/objects.h"
 #include "src/objects/property-array.h"
-#include "torque-generated/class-definitions-from-dsl.h"
+#include "torque-generated/field-offsets-tq.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -68,6 +68,7 @@ class JSReceiver : public HeapObject {
   static void DeleteNormalizedProperty(Handle<JSReceiver> object, int entry);
 
   DECL_CAST(JSReceiver)
+  DECL_VERIFIER(JSReceiver)
 
   // ES6 section 7.1.1 ToPrimitive
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ToPrimitive(
@@ -259,18 +260,11 @@ class JSReceiver : public HeapObject {
       Handle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
-  V8_WARN_UNUSED_RESULT static Handle<FixedArray> GetOwnElementIndices(
-      Isolate* isolate, Handle<JSReceiver> receiver, Handle<JSObject> object);
-
   static const int kHashMask = PropertyArray::HashField::kMask;
 
   DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize,
                                 TORQUE_GENERATED_JSRECEIVER_FIELDS)
-  static const int kHeaderSize = kSize;
-
   bool HasProxyInPrototype(Isolate* isolate);
-
-  bool HasComplexElements();
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetPrivateEntries(
       Isolate* isolate, Handle<JSReceiver> receiver);
@@ -345,8 +339,9 @@ class JSObject : public JSReceiver {
   // Returns true if an object has elements of PACKED_ELEMENTS
   inline bool HasPackedElements();
   inline bool HasFrozenOrSealedElements();
+  inline bool HasSealedElements();
 
-  inline bool HasFixedTypedArrayElements();
+  inline bool HasTypedArrayElements();
 
   inline bool HasFixedUint8ClampedElements();
   inline bool HasFixedArrayElements();
@@ -437,11 +432,11 @@ class JSObject : public JSReceiver {
 
   // Migrates the given object to a map whose field representations are the
   // lowest upper bound of all known representations for that field.
-  static void MigrateInstance(Handle<JSObject> instance);
+  static void MigrateInstance(Isolate* isolate, Handle<JSObject> instance);
 
   // Migrates the given object only if the target map is already available,
   // or returns false if such a map is not yet available.
-  static bool TryMigrateInstance(Handle<JSObject> instance);
+  static bool TryMigrateInstance(Isolate* isolate, Handle<JSObject> instance);
 
   // Sets the property value in a normalized object given (key, value, details).
   // Handles the special representation of JS global objects.
@@ -602,7 +597,7 @@ class JSObject : public JSReceiver {
   // |expected_additional_properties| is only used for fast-to-slow transitions
   // and ignored otherwise.
   V8_EXPORT_PRIVATE static void MigrateToMap(
-      Handle<JSObject> object, Handle<Map> new_map,
+      Isolate* isolate, Handle<JSObject> object, Handle<Map> new_map,
       int expected_additional_properties = 0);
 
   // Forces a prototype without any of the checks that the regular SetPrototype
@@ -615,7 +610,7 @@ class JSObject : public JSReceiver {
   // added this number can be indicated to have the backing store allocated to
   // an initial capacity for holding these properties.
   V8_EXPORT_PRIVATE static void NormalizeProperties(
-      Handle<JSObject> object, PropertyNormalizationMode mode,
+      Isolate* isolate, Handle<JSObject> object, PropertyNormalizationMode mode,
       int expected_additional_properties, const char* reason);
 
   // Convert and update the elements backing store to be a
@@ -641,7 +636,12 @@ class JSObject : public JSReceiver {
   inline uint64_t RawFastDoublePropertyAsBitsAt(FieldIndex index);
 
   inline void FastPropertyAtPut(FieldIndex index, Object value);
-  inline void RawFastPropertyAtPut(FieldIndex index, Object value);
+  inline void RawFastPropertyAtPut(
+      FieldIndex index, Object value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+  inline void RawFastInobjectPropertyAtPut(
+      FieldIndex index, Object value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   inline void RawFastDoublePropertyAsBitsAtPut(FieldIndex index, uint64_t bits);
   inline void WriteToField(int descriptor, PropertyDetails details,
                            Object value);
@@ -836,9 +836,17 @@ class JSObject : public JSReceiver {
 class JSAccessorPropertyDescriptor : public JSObject {
  public:
   // Layout description.
-  DEFINE_FIELD_OFFSET_CONSTANTS(
-      JSObject::kHeaderSize,
-      TORQUE_GENERATED_JSACCESSOR_PROPERTY_DESCRIPTOR_FIELDS)
+#define JS_ACCESSOR_PROPERTY_DESCRIPTOR_FIELDS(V) \
+  V(kGetOffset, kTaggedSize)                      \
+  V(kSetOffset, kTaggedSize)                      \
+  V(kEnumerableOffset, kTaggedSize)               \
+  V(kConfigurableOffset, kTaggedSize)             \
+  /* Total size. */                               \
+  V(kSize, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                JS_ACCESSOR_PROPERTY_DESCRIPTOR_FIELDS)
+#undef JS_ACCESSOR_PROPERTY_DESCRIPTOR_FIELDS
 
   // Indices of in-object properties.
   static const int kGetIndex = 0;
@@ -856,8 +864,18 @@ class JSAccessorPropertyDescriptor : public JSObject {
 // FromPropertyDescriptor function for regular data properties.
 class JSDataPropertyDescriptor : public JSObject {
  public:
-  DEFINE_FIELD_OFFSET_CONSTANTS(
-      JSObject::kHeaderSize, TORQUE_GENERATED_JSDATA_PROPERTY_DESCRIPTOR_FIELDS)
+  // Layout description.
+#define JS_DATA_PROPERTY_DESCRIPTOR_FIELDS(V) \
+  V(kValueOffset, kTaggedSize)                \
+  V(kWritableOffset, kTaggedSize)             \
+  V(kEnumerableOffset, kTaggedSize)           \
+  V(kConfigurableOffset, kTaggedSize)         \
+  /* Total size. */                           \
+  V(kSize, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                JS_DATA_PROPERTY_DESCRIPTOR_FIELDS)
+#undef JS_DATA_PROPERTY_DESCRIPTOR_FIELDS
 
   // Indices of in-object properties.
   static const int kValueIndex = 0;
@@ -871,7 +889,7 @@ class JSDataPropertyDescriptor : public JSObject {
 
 // JSIteratorResult is just a JSObject with a specific initial map.
 // This initial map adds in-object properties for "done" and "value",
-// as specified by ES6 section 25.1.1.3 The IteratorResult Interface
+// as specified by ES6 section 25.1.1.3 The IteratorResult Interface.
 class JSIteratorResult : public JSObject {
  public:
   DECL_ACCESSORS(value, Object)
@@ -902,7 +920,6 @@ class JSIteratorResult : public JSObject {
 class JSBoundFunction : public JSObject {
  public:
   // [bound_target_function]: The wrapped function object.
-  inline Object raw_bound_target_function() const;
   DECL_ACCESSORS(bound_target_function, JSReceiver)
 
   // [bound_this]: The value that is always passed as the this value when
@@ -1209,15 +1226,8 @@ class JSGlobalObject : public JSObject {
   DECL_VERIFIER(JSGlobalObject)
 
   // Layout description.
-#define JS_GLOBAL_OBJECT_FIELDS(V)     \
-  V(kNativeContextOffset, kTaggedSize) \
-  V(kGlobalProxyOffset, kTaggedSize)   \
-  /* Header size. */                   \
-  V(kHeaderSize, 0)                    \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_GLOBAL_OBJECT_FIELDS)
-#undef JS_GLOBAL_OBJECT_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                TORQUE_GENERATED_JSGLOBAL_OBJECT_FIELDS)
 
   OBJECT_CONSTRUCTORS(JSGlobalObject, JSObject);
 };
@@ -1356,23 +1366,30 @@ class JSMessageObject : public JSObject {
   // [stack_frames]: an array of stack frames for this error object.
   DECL_ACCESSORS(stack_frames, Object)
 
-  // [start_position]: the start position in the script for the error message.
-  inline int start_position() const;
-  inline void set_start_position(int value);
+  // Initializes the source positions in the object if possible. Does nothing if
+  // called more than once. If called when stack space is exhausted, then the
+  // source positions will be not be set and calling it again when there is more
+  // stack space will not have any effect.
+  static void EnsureSourcePositionsAvailable(Isolate* isolate,
+                                             Handle<JSMessageObject> message);
 
-  // [end_position]: the end position in the script for the error message.
-  inline int end_position() const;
-  inline void set_end_position(int value);
+  // Gets the start and end positions for the message.
+  // EnsureSourcePositionsAvailable must have been called before calling these.
+  inline int GetStartPosition() const;
+  inline int GetEndPosition() const;
 
   // Returns the line number for the error message (1-based), or
   // Message::kNoLineNumberInfo if the line cannot be determined.
+  // EnsureSourcePositionsAvailable must have been called before calling this.
   V8_EXPORT_PRIVATE int GetLineNumber() const;
 
   // Returns the offset of the given position within the containing line.
+  // EnsureSourcePositionsAvailable must have been called before calling this.
   V8_EXPORT_PRIVATE int GetColumnNumber() const;
 
   // Returns the source code line containing the given source
   // position, or the empty string if the position is invalid.
+  // EnsureSourcePositionsAvailable must have been called before calling this.
   Handle<String> GetSourceLine() const;
 
   inline int error_level() const;
@@ -1393,6 +1410,27 @@ class JSMessageObject : public JSObject {
                                              kPointerFieldsEndOffset, kSize>;
 
   OBJECT_CONSTRUCTORS(JSMessageObject, JSObject);
+
+ private:
+  friend class Factory;
+
+  inline bool DidEnsureSourcePositionsAvailable() const;
+
+  // [shared]: optional SharedFunctionInfo that can be used to reconstruct the
+  // source position if not available when the message was generated.
+  DECL_ACCESSORS(shared_info, HeapObject)
+
+  // [bytecode_offset]: optional offset using along with |shared| to generation
+  // source positions.
+  DECL_ACCESSORS(bytecode_offset, Smi)
+
+  // [start_position]: the start position in the script for the error message.
+  inline int start_position() const;
+  inline void set_start_position(int value);
+
+  // [end_position]: the end position in the script for the error message.
+  inline int end_position() const;
+  inline void set_end_position(int value);
 };
 
 // The [Async-from-Sync Iterator] object

@@ -12,17 +12,17 @@
 #include "src/base/hashmap.h"
 #include "src/builtins/builtins-constructor.h"
 #include "src/builtins/builtins.h"
-#include "src/contexts.h"
-#include "src/conversions-inl.h"
-#include "src/double.h"
-#include "src/elements.h"
-#include "src/objects-inl.h"
+#include "src/numbers/conversions-inl.h"
+#include "src/numbers/double.h"
+#include "src/objects/contexts.h"
+#include "src/objects/elements.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/map.h"
-#include "src/property-details.h"
-#include "src/property.h"
-#include "src/string-stream.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property-details.h"
+#include "src/objects/property.h"
+#include "src/strings/string-stream.h"
 #include "src/zone/zone-list-inl.h"
 
 namespace v8 {
@@ -130,6 +130,10 @@ bool Expression::ToBooleanIsTrue() const {
 
 bool Expression::ToBooleanIsFalse() const {
   return IsLiteral() && AsLiteral()->ToBooleanIsFalse();
+}
+
+bool Expression::IsPrivateName() const {
+  return IsVariableProxy() && AsVariableProxy()->IsPrivateName();
 }
 
 bool Expression::IsValidReferenceExpression() const {
@@ -280,6 +284,17 @@ std::unique_ptr<char[]> FunctionLiteral::GetDebugName() const {
   memcpy(result.get(), result_vec.data(), result_vec.size());
   result[result_vec.size()] = '\0';
   return result;
+}
+
+bool FunctionLiteral::requires_brand_initialization() const {
+  Scope* outer = scope_->outer_scope();
+
+  // If there are no variables declared in the outer scope other than
+  // the class name variable, the outer class scope may be elided when
+  // the function is deserialized after preparsing.
+  if (!outer->is_class_scope()) return false;
+
+  return outer->AsClassScope()->brand() != nullptr;
 }
 
 ObjectLiteralProperty::ObjectLiteralProperty(Expression* key, Expression* value,
@@ -821,6 +836,9 @@ Call::CallType Call::GetCallType() const {
 
   Property* property = expression()->AsProperty();
   if (property != nullptr) {
+    if (property->IsPrivateReference()) {
+      return PRIVATE_CALL;
+    }
     bool is_super = property->IsSuperAccess();
     if (property->key()->IsPropertyName()) {
       return is_super ? NAMED_SUPER_PROPERTY_CALL : NAMED_PROPERTY_CALL;

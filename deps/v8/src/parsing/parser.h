@@ -12,11 +12,11 @@
 #include "src/ast/scopes.h"
 #include "src/base/compiler-specific.h"
 #include "src/base/threaded-list.h"
-#include "src/globals.h"
+#include "src/common/globals.h"
 #include "src/parsing/parser-base.h"
 #include "src/parsing/parsing.h"
 #include "src/parsing/preparser.h"
-#include "src/pointer-with-payload.h"
+#include "src/utils/pointer-with-payload.h"
 #include "src/zone/zone-chunk-list.h"
 
 namespace v8 {
@@ -233,11 +233,8 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
           parsing_module_, parsing_on_main_thread_);
 #define SET_ALLOW(name) reusable_preparser_->set_allow_##name(allow_##name());
       SET_ALLOW(natives);
-      SET_ALLOW(harmony_public_fields);
-      SET_ALLOW(harmony_static_fields);
       SET_ALLOW(harmony_dynamic_import);
       SET_ALLOW(harmony_import_meta);
-      SET_ALLOW(harmony_private_fields);
       SET_ALLOW(harmony_private_methods);
       SET_ALLOW(eval_cache);
 #undef SET_ALLOW
@@ -300,8 +297,9 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                              VariableKind kind, int beg_pos, int end_pos,
                              ZonePtrList<const AstRawString>* names);
   Variable* CreateSyntheticContextVariable(const AstRawString* synthetic_name);
-  Variable* CreatePrivateNameVariable(ClassScope* scope,
-                                      const AstRawString* name);
+  Variable* CreatePrivateNameVariable(
+      ClassScope* scope, RequiresBrandCheckFlag requires_brand_check,
+      const AstRawString* name);
   FunctionLiteral* CreateInitializerFunction(
       const char* name, DeclarationScope* scope,
       ZonePtrList<ClassLiteral::Property>* fields);
@@ -316,6 +314,19 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                           int class_token_pos, int end_pos);
   void DeclareClassVariable(const AstRawString* name, ClassInfo* class_info,
                             int class_token_pos);
+  void DeclareClassBrandVariable(ClassScope* scope, ClassInfo* class_info,
+                                 int class_token_pos);
+  void DeclarePrivateClassMember(ClassScope* scope,
+                                 const AstRawString* property_name,
+                                 ClassLiteralProperty* property,
+                                 ClassLiteralProperty::Kind kind,
+                                 bool is_static, ClassInfo* class_info);
+  void DeclarePublicClassMethod(const AstRawString* class_name,
+                                ClassLiteralProperty* property,
+                                bool is_constructor, ClassInfo* class_info);
+  void DeclarePublicClassField(ClassScope* scope,
+                               ClassLiteralProperty* property, bool is_static,
+                               bool is_computed_name, ClassInfo* class_info);
   void DeclareClassProperty(ClassScope* scope, const AstRawString* class_name,
                             ClassLiteralProperty* property, bool is_constructor,
                             ClassInfo* class_info);
@@ -362,8 +373,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     object_literal->CalculateEmitStore(main_zone());
     return object_literal;
   }
-
-  bool IsPropertyWithPrivateFieldKey(Expression* property);
 
   // Insert initializer statements for var-bindings shadowing parameter bindings
   // from a non-simple parameter list.
@@ -528,6 +537,13 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     return property != nullptr && property->obj()->IsThisExpression();
   }
 
+  // Returns true if the expression is of type "obj.#foo".
+  V8_INLINE static bool IsPrivateReference(Expression* expression) {
+    DCHECK_NOT_NULL(expression);
+    Property* property = expression->AsProperty();
+    return property != nullptr && property->IsPrivateReference();
+  }
+
   // This returns true if the expression is an indentifier (wrapped
   // inside a variable proxy).  We exclude the case of 'this', which
   // has been converted to a variable proxy.
@@ -631,7 +647,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     if (expr->IsStringLiteral()) return expr;
     ScopedPtrList<Expression> args(pointer_buffer());
     args.Add(expr);
-    return factory()->NewCallRuntime(Runtime::kInlineToString, args,
+    return factory()->NewCallRuntime(Runtime::kInlineToStringRT, args,
                                      expr->position());
   }
 
@@ -699,6 +715,10 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                                              source_location.end_pos, message,
                                              arg, error_type);
     scanner_.set_parser_error();
+  }
+
+  const AstRawString* GetRawNameFromIdentifier(const AstRawString* arg) {
+    return arg;
   }
 
   void ReportUnexpectedTokenAt(
@@ -917,6 +937,11 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     source_range_map_->Insert(
         node->AsConditional(),
         new (zone()) ConditionalSourceRanges(then_range, else_range));
+  }
+
+  V8_INLINE void RecordFunctionLiteralSourceRange(FunctionLiteral* node) {
+    if (source_range_map_ == nullptr) return;
+    source_range_map_->Insert(node, new (zone()) FunctionLiteralSourceRanges);
   }
 
   V8_INLINE void RecordBinaryOperationSourceRange(
