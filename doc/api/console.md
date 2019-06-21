@@ -256,6 +256,21 @@ added: v0.1.101
 Uses [`util.inspect()`][] on `obj` and prints the resulting string to `stdout`.
 This function bypasses any custom `inspect()` function defined on `obj`.
 
+<!-- eslint-skip -->
+```js
+> console.dir();
+undefined
+> console.dir(['a', 'b', 'c']);
+//  (3) […]
+//    0: "a"
+//    1: "b"
+//    2: "c"
+//    length: 3
+//    <prototype>: Array []
+//undefined
+>
+```
+
 ### console.dirxml(...data)
 <!-- YAML
 added: v8.0.0
